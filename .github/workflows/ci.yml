@@ -1,0 +1,56 @@
+# Shared CI for every DWD repo (dwd-kb CONVENTIONS.md section 11).
+#
+# Other repos call it from their own ci.yml:
+#   jobs:
+#     checks:
+#       uses: deepwater-digital/.github/.github/workflows/ci.yml@<full commit SHA>
+#       with:
+#         check-command: <the repo's own checks, such as lint and tests>
+#
+# It also runs on this repo's own PRs, so a change here is tested before
+# any repo starts using it. This repo is public: nothing secret goes in it.
+name: ci
+
+on:
+  workflow_call:
+    inputs:
+      check-command:
+        description: The repo's own checks, run before the secret scan. Empty runs only the secret scan.
+        type: string
+        default: ""
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repo with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Repo checks
+        if: inputs.check-command != ''
+        env:
+          CHECK_COMMAND: ${{ inputs.check-command }}
+        run: bash -c "$CHECK_COMMAND"
+
+      - name: Secret scan (gitleaks, whole history)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$file" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${file}"
+          echo "${GITLEAKS_SHA256}  ${file}" | sha256sum -c -
+          tar -xzf "$file" gitleaks
+          ./gitleaks git --redact --no-banner .
