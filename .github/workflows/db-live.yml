@@ -4,33 +4,33 @@
 # advisor shows a warning. Other repos call it from their own ci.yml:
 #   jobs:
 #     db-live:
-#       if: github.event_name != 'push' && vars.SUPABASE_PROJECT_REF != '' && github.actor != 'dependabot[bot]'
+#       if: github.event_name != 'push' && github.actor != 'dependabot[bot]'
 #       uses: deepwater-digital/.github/.github/workflows/db-live.yml@<full commit SHA>
-#       with:
-#         project-ref: ${{ vars.SUPABASE_PROJECT_REF }}
 #       secrets:
-#         SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+#         CHECKS_DB_URL: ${{ secrets.CHECKS_DB_URL }}
 #
-# The token should be read-only and scoped to the one project. No database
-# password is used, since this job runs on PRs and a password can write.
+# CHECKS_DB_URL logs in as a role that can read the schema and the migration
+# history, and no table holding data. It must use the session pooler, since
+# GitHub's runners have no IPv6. No access token is needed: linking a project
+# would need one that can read the project's API keys.
 #
 # The caller's package.json pins the Supabase CLI. This repo is public, so the
-# project reference and the secret come from the caller.
+# secret comes from the caller.
 name: db-live
 
 on:
   workflow_call:
     inputs:
-      project-ref:
-        description: The Supabase project to check.
-        type: string
-        required: true
       schemas:
         description: Comma separated schemas to compare. Supabase's own schemas stay out, since it changes them itself.
         type: string
         default: public
+      checkout-ref:
+        description: Compare against these files instead of the base branch. Only for proving the checks catch drift.
+        type: string
+        default: ""
     secrets:
-      SUPABASE_ACCESS_TOKEN:
+      CHECKS_DB_URL:
         required: true
 
 permissions:
@@ -40,8 +40,7 @@ jobs:
   live:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # An explicit shell turns on pipefail. Without it, a crash behind "| tee"
-    # leaves empty output, which would read as "no drift" and pass.
+    # An explicit shell turns on pipefail, so a crashed command fails the step.
     defaults:
       run:
         shell: bash
@@ -52,7 +51,7 @@ jobs:
       - name: Check out the migrations the live project should match
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ inputs.checkout-ref || github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
 
       # Secrets are set only on the steps after this one, so install scripts
@@ -60,38 +59,34 @@ jobs:
       - name: Install the pinned Supabase CLI
         run: npm ci
 
-      - name: Link the project
-        env:
-          PROJECT_REF: ${{ inputs.project-ref }}
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: npx supabase link --project-ref "$PROJECT_REF"
-
+      # The CLI's JSON output is parsed strictly, so output it cannot read fails
+      # the check instead of passing it.
       - name: Migration history matches the files
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          CHECKS_DB_URL: ${{ secrets.CHECKS_DB_URL }}
         run: |
-          npx supabase migration list --linked | tee history.txt
-          # A row with an empty Local or Remote column means the two disagree.
-          if awk -F'|' 'NF >= 3 && $1 !~ /Local/ && $1 !~ /---/ {
-              gsub(/ /, "", $1); gsub(/ /, "", $2)
-              if ($1 == "" || $2 == "") bad = 1
-            } END { exit !bad }' history.txt; then
-            echo "Migration history does not match the files."
+          npx supabase migration list --db-url "$CHECKS_DB_URL" --output-format json --agent no > history.json
+          jq -c '.migrations[]' history.json
+          unmatched=$(jq -e '[.migrations[] | select(.local == "" or .remote == "")] | length' history.json)
+          if [ "$unmatched" != "0" ]; then
+            echo "Migration history does not match the files: $unmatched row(s) differ."
             exit 1
           fi
 
       - name: No drift between the live schema and the files
         env:
           SCHEMAS: ${{ inputs.schemas }}
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          CHECKS_DB_URL: ${{ secrets.CHECKS_DB_URL }}
         run: |
-          npx supabase db diff --linked --schema "$SCHEMAS" | tee drift.sql
-          if [ -s drift.sql ]; then
-            echo "The live schema has drifted from the migration files."
+          npx supabase db diff --db-url "$CHECKS_DB_URL" --schema "$SCHEMAS" --output-format json --agent no > drift.json
+          drift=$(jq -er '.diff | strings' drift.json)
+          if [ -n "$drift" ]; then
+            echo "The live schema has drifted from the migration files:"
+            echo "$drift"
             exit 1
           fi
 
       - name: Security advisor shows no warnings
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: npx supabase db advisors --linked --type security --fail-on warn
+          CHECKS_DB_URL: ${{ secrets.CHECKS_DB_URL }}
+        run: npx supabase db advisors --db-url "$CHECKS_DB_URL" --type security --fail-on warn --agent no
