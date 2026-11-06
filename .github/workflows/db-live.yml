@@ -10,10 +10,12 @@
 #         project-ref: ${{ vars.SUPABASE_PROJECT_REF }}
 #       secrets:
 #         SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-#         SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+#
+# The token should be read-only and scoped to the one project. No database
+# password is used, since this job runs on PRs and a password can write.
 #
 # The caller's package.json pins the Supabase CLI. This repo is public, so the
-# project reference and the secrets come from the caller.
+# project reference and the secret come from the caller.
 name: db-live
 
 on:
@@ -29,8 +31,6 @@ on:
         default: public
     secrets:
       SUPABASE_ACCESS_TOKEN:
-        required: true
-      SUPABASE_DB_PASSWORD:
         required: true
 
 permissions:
@@ -64,13 +64,11 @@ jobs:
         env:
           PROJECT_REF: ${{ inputs.project-ref }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: npx supabase link --project-ref "$PROJECT_REF"
 
       - name: Migration history matches the files
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           npx supabase migration list --linked | tee history.txt
           # A row with an empty Local or Remote column means the two disagree.
@@ -86,7 +84,6 @@ jobs:
         env:
           SCHEMAS: ${{ inputs.schemas }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           npx supabase db diff --linked --schema "$SCHEMAS" | tee drift.sql
           if [ -s drift.sql ]; then
@@ -97,5 +94,4 @@ jobs:
       - name: Security advisor shows no warnings
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: npx supabase db advisors --linked --type security --fail-on warn
