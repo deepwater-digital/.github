@@ -12,7 +12,9 @@
 ## Why
 
 - **Shared workflows, called by pin.** Each repo keeps at most three small workflow files that call these, so a tool change is fixed once. Pinning to a commit means a change here reaches a repo only through a reviewed update PR.
-- **Live checks are a separate workflow.** `ci.yml` passes no secrets, and that should stay true for code that installs packages. `db-live.yml` takes GitHub secrets from its caller, sets them only on the steps after install, and checks out only the base branch, so a PR's code never runs beside them.
+- **Live checks are a separate workflow.** `ci.yml` passes no secrets, and that should stay true for code that installs packages. `db-live.yml` takes one secret from its caller, sets it only on the steps after install, and checks out only the base branch, so a PR's code never runs beside it.
+- **Live checks log in as a role that can read no data.** It sees the schema and the migration history, which is all these checks need. Linking a project instead would need a token that can read the project's API keys, including the master service key.
+- **The CLI's JSON output is parsed strictly.** Output the check cannot read fails it, rather than reading as "no drift".
 - **A PR's drift check reads the base branch's migrations.** The PR's own migration is not applied until it merges, so comparing against it would always fail.
 - **Secret scan without a third-party action.** The gitleaks binary is downloaded and checked against a pinned hash, so no outside code runs with the repo's token.
 - **Public repo.** GitHub shows an org profile only from a public `.github` repo, so this repo stays public and holds nothing sensitive.
