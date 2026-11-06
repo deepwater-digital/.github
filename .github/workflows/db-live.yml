@@ -1,0 +1,105 @@
+# Live database checks for repos with Supabase (dwd-kb CONVENTIONS.md section 13).
+#
+# Fails if the live project and the migration files disagree, or if the security
+# advisor shows a warning. Other repos call it from their own ci.yml:
+#   jobs:
+#     db-live:
+#       if: github.event_name != 'push' && vars.SUPABASE_PROJECT_REF != '' && github.actor != 'dependabot[bot]'
+#       uses: deepwater-digital/.github/.github/workflows/db-live.yml@<full commit SHA>
+#       with:
+#         project-ref: ${{ vars.SUPABASE_PROJECT_REF }}
+#         access-token-ref: <op:// reference>
+#         db-password-ref: <op:// reference>
+#       secrets:
+#         OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+#
+# The caller's package.json pins the Supabase CLI. This repo is public, so the
+# project reference and 1Password references come from the caller.
+name: db-live
+
+on:
+  workflow_call:
+    inputs:
+      project-ref:
+        description: The Supabase project to check.
+        type: string
+        required: true
+      schemas:
+        description: Comma separated schemas to compare. Supabase's own schemas stay out, since it changes them itself.
+        type: string
+        default: public
+      access-token-ref:
+        description: 1Password reference for the Supabase access token.
+        type: string
+        required: true
+      db-password-ref:
+        description: 1Password reference for the database password.
+        type: string
+        required: true
+    secrets:
+      OP_SERVICE_ACCOUNT_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # An explicit shell turns on pipefail. Without it, a crash behind "| tee"
+    # leaves empty output, which would read as "no drift" and pass.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # A PR's new migration is not applied until it merges, so a PR compares
+      # the live project with the base branch's files, not its own.
+      - name: Check out the migrations the live project should match
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+
+      # Runs before any secret is loaded, so install scripts never see one.
+      - name: Install the pinned Supabase CLI
+        run: npm ci
+
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          SUPABASE_ACCESS_TOKEN: ${{ inputs.access-token-ref }}
+          SUPABASE_DB_PASSWORD: ${{ inputs.db-password-ref }}
+
+      - name: Link the project
+        env:
+          PROJECT_REF: ${{ inputs.project-ref }}
+        run: npx supabase link --project-ref "$PROJECT_REF"
+
+      - name: Migration history matches the files
+        run: |
+          npx supabase migration list --linked | tee history.txt
+          # A row with an empty Local or Remote column means the two disagree.
+          if awk -F'|' 'NF >= 3 && $1 !~ /Local/ && $1 !~ /---/ {
+              gsub(/ /, "", $1); gsub(/ /, "", $2)
+              if ($1 == "" || $2 == "") bad = 1
+            } END { exit !bad }' history.txt; then
+            echo "Migration history does not match the files."
+            exit 1
+          fi
+
+      - name: No drift between the live schema and the files
+        env:
+          SCHEMAS: ${{ inputs.schemas }}
+        run: |
+          npx supabase db diff --linked --schema "$SCHEMAS" | tee drift.sql
+          if [ -s drift.sql ]; then
+            echo "The live schema has drifted from the migration files."
+            exit 1
+          fi
+
+      - name: Security advisor shows no warnings
+        run: npx supabase db advisors --linked --type security --fail-on warn
